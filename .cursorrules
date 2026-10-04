@@ -1,0 +1,6 @@
+# Reglas de Desarrollo para Sistema de Inventario
+- **Stack Tecnológico:** Laravel 12, Inertia.js, Vue 3 (Composition API con <script setup>), Tailwind CSS.
+- **Base de Datos:** PostgreSQL.
+- **Idioma:** Código, funciones y variables en Inglés. Interfaz de usuario (UI), etiquetas, mensajes y comentarios en Español.
+- **Arquitectura:** Controladores delgados (Thin Controllers). Mueve la lógica pesada de inventario (restar/sumar stock, transacciones DB, cálculo de divisas) a Services o Actions.
+- **Diseño UI:** Interfaces limpias, modernas, profesionales y totalmente responsivas usando Tailwind CSS.
