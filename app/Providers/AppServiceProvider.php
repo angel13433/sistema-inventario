@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Facades\Vite;
 use Illuminate\Support\ServiceProvider;
 
@@ -20,6 +21,11 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // Railway termina SSL en su proxy: forzar HTTPS evita contenido mixto en los assets de Vite.
+        if ($this->app->environment('production') || env('APP_ENV') === 'production') {
+            URL::forceScheme('https');
+        }
+
         Vite::prefetch(concurrency: 3);
     }
 }
