@@ -6,13 +6,11 @@ use App\Http\Controllers\InventoryMovementController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\SupplierController;
-use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Route;
-use Inertia\Inertia;
 
-// La raíz entra directo al sistema: el middleware 'auth' de /dashboard
-// envía a los invitados a /login automáticamente.
-Route::redirect('/', '/dashboard');
+// La raíz redirige directamente al login
+// (si ya hay sesión, el middleware 'guest' de /login envía al dashboard).
+Route::redirect('/', '/login');
 
 Route::get('/dashboard', [DashboardController::class, 'index'])
     ->middleware(['auth', 'verified'])
