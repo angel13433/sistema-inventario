@@ -1,373 +1,273 @@
 <script setup>
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
-import StatCard from '@/Components/Ui/StatCard.vue';
-import Badge from '@/Components/Ui/Badge.vue';
-import { Head, Link, useForm, router } from '@inertiajs/vue3';
-import { ref } from 'vue';
+import SummaryCards from '@/Components/Inventory/SummaryCards.vue';
+import ProductTable from '@/Components/Inventory/ProductTable.vue';
+import StockAlerts from '@/Components/Inventory/StockAlerts.vue';
+import ConfirmModal from '@/Components/Ui/ConfirmModal.vue';
+import { Head, Link, router, useForm } from '@inertiajs/vue3';
+import { computed, nextTick, ref } from 'vue';
+import { formatNumber } from '@/utils/format';
 
 const props = defineProps({
-    metrics:          { type: Object, required: true },
-    bcvRate:          { type: Number, default: 36.50 },
-    lowStockProducts: { type: Array, default: () => [] },
-    recentMovements:  { type: Array, default: () => [] },
+    metrics:    { type: Object, required: true },
+    products:   { type: Array, default: () => [] },
+    alerts:     { type: Array, default: () => [] },
+    categories: { type: Array, default: () => [] },
+    bcvRate:    { type: Number, default: 36.5 },
 });
 
-// ── Tasa BCV ─────────────────────────────────────────────────────
-const editingRate  = ref(false);
-const newRateInput = ref(props.bcvRate);
-const rateForm     = useForm({ rate: props.bcvRate });
+// ── Filtros (búsqueda, categoría y estado) ──────────────────────
+const search = ref('');
+const categoryId = ref('');
+const statusFilter = ref('all');
 
-const startEditRate = () => {
-    newRateInput.value = props.bcvRate;
-    editingRate.value = true;
+const statusTabs = [
+    { value: 'all',          label: 'Todos' },
+    { value: 'in_stock',     label: 'En stock' },
+    { value: 'low_stock',    label: 'Stock bajo' },
+    { value: 'out_of_stock', label: 'Agotados' },
+];
+
+const countByStatus = computed(() => {
+    const counts = { all: props.products.length, in_stock: 0, low_stock: 0, out_of_stock: 0 };
+    props.products.forEach((p) => { counts[p.status] = (counts[p.status] ?? 0) + 1; });
+    return counts;
+});
+
+const filteredProducts = computed(() => {
+    const term = search.value.trim().toLowerCase();
+
+    return props.products.filter((p) => {
+        const matchesSearch = !term || [p.name, p.sku, p.supplier]
+            .some((field) => field?.toLowerCase().includes(term));
+        const matchesCategory = !categoryId.value || String(p.category_id) === String(categoryId.value);
+        const matchesStatus = statusFilter.value === 'all' || p.status === statusFilter.value;
+
+        return matchesSearch && matchesCategory && matchesStatus;
+    });
+});
+
+// ── Exportar CSV de los productos filtrados ─────────────────────
+const statusLabels = { in_stock: 'En stock', low_stock: 'Stock bajo', out_of_stock: 'Agotado' };
+
+const exportCsv = () => {
+    const header = ['SKU', 'Producto', 'Categoría', 'Proveedor', 'Stock', 'Stock mínimo', 'Precio USD', 'Estado'];
+    const escape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const rows = filteredProducts.value.map((p) => [
+        p.sku, p.name, p.category, p.supplier, p.current_stock, p.min_stock, p.price_usd.toFixed(2), statusLabels[p.status],
+    ].map(escape).join(';'));
+
+    const blob = new Blob(['\uFEFF' + [header.map(escape).join(';'), ...rows].join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `inventario-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
 };
 
-const cancelEditRate = () => {
-    editingRate.value = false;
+// ── Tasa BCV ────────────────────────────────────────────────────
+const editingRate = ref(false);
+const rateInput = ref(null);
+const rateForm = useForm({ rate: props.bcvRate });
+
+const startEditRate = async () => {
+    rateForm.rate = props.bcvRate;
+    editingRate.value = true;
+    await nextTick();
+    rateInput.value?.focus();
 };
 
 const submitRate = () => {
-    rateForm.rate = parseFloat(newRateInput.value);
     rateForm.patch(route('settings.bcv-rate'), {
+        preserveScroll: true,
         onSuccess: () => { editingRate.value = false; },
     });
 };
 
-// ── Buscador rápido ──────────────────────────────────────────────
-const quickSearch = ref('');
-const doSearch = () => {
-    const q = quickSearch.value.trim();
-    if (!q) return;
-    router.get(route('products.index'), { search: q });
-};
+// ── Eliminar producto ───────────────────────────────────────────
+const productToDelete = ref(null);
+const deleting = ref(false);
 
-// ── Helpers ──────────────────────────────────────────────────────
-const formatVES = (usdStr) => {
-    const num = parseFloat(usdStr) || 0;
-    return (num * props.bcvRate).toLocaleString('es-VE', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-    });
-};
-
-const formatDate = (dateStr) => {
-    if (!dateStr) return '—';
-    return new Date(dateStr).toLocaleDateString('es-VE', {
-        day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+const confirmDelete = () => {
+    if (!productToDelete.value) return;
+    deleting.value = true;
+    router.delete(route('products.destroy', productToDelete.value.id), {
+        preserveScroll: true,
+        onFinish: () => {
+            deleting.value = false;
+            productToDelete.value = null;
+        },
     });
 };
 </script>
 
 <template>
-    <Head title="Dashboard — Inventario" />
+    <Head title="Control de Inventario">
+        <meta name="description" content="Panel de control del inventario: métricas, alertas de stock y listado de productos." />
+    </Head>
+
     <AuthenticatedLayout>
-        <div class="p-6 space-y-5">
-
-            <!-- ── Encabezado ──────────────────────────────────────── -->
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div>
-                    <h1 class="text-2xl font-bold text-white">Panel de Control</h1>
-                    <p class="text-gray-400 text-sm mt-0.5">Resumen general del inventario</p>
-                </div>
-                <div class="flex items-center gap-2 flex-shrink-0">
-                    <!-- Nuevo Producto (secundario) -->
-                    <Link
-                        :href="route('products.create')"
-                        class="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white text-sm font-medium border border-gray-600 transition-all duration-150"
-                    >
-                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
-                        </svg>
-                        <span class="hidden sm:inline">Nuevo Producto</span>
-                        <span class="sm:hidden">Producto</span>
-                    </Link>
-                    <!-- Nuevo Movimiento (primario) -->
-                    <Link
-                        :href="route('inventory-movements.index')"
-                        class="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-all duration-150 shadow-lg shadow-indigo-600/20"
-                    >
-                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 7.5L7.5 3m0 0L12 7.5M7.5 3v13.5m13.5 0L16.5 21m0 0L12 16.5m4.5 4.5V7.5" />
-                        </svg>
-                        <span class="hidden sm:inline">Nuevo Movimiento</span>
-                        <span class="sm:hidden">Movimiento</span>
-                    </Link>
-                </div>
-            </div>
-
-            <!-- ── Buscador rápido de productos ───────────────────── -->
-            <div class="relative group">
-                <svg class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none group-focus-within:text-indigo-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-                </svg>
-                <input
-                    id="quick-search"
-                    v-model="quickSearch"
-                    type="text"
-                    placeholder="Buscar producto por nombre, SKU o código de barras..."
-                    @keyup.enter="doSearch"
-                    class="w-full pl-11 pr-28 py-3 rounded-xl bg-gray-800 border border-gray-700 text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-150"
-                />
-                <button
-                    id="quick-search-btn"
-                    @click="doSearch"
-                    :disabled="!quickSearch.trim()"
-                    class="absolute right-2 top-1/2 -translate-y-1/2 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                >
-                    Buscar
-                </button>
-            </div>
-
-            <!-- ── Tasa BCV ────────────────────────────────────────── -->
-            <div class="flex flex-wrap items-center gap-4 px-5 py-3.5 rounded-xl bg-gray-800 border border-gray-700/80">
-                <!-- Ícono + Tasa -->
-                <div class="flex items-center gap-3 flex-shrink-0">
-                    <div class="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center flex-shrink-0">
-                        <svg class="w-4.5 h-4.5 text-emerald-400" style="width:1.125rem;height:1.125rem" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 21v-8.25M15.75 21v-8.25M8.25 21v-8.25M3 9l9-6 9 6m-1.5 12V10.332A48.36 48.36 0 0012 9.75c-2.551 0-5.056.2-7.5.582V21M3 21h18M12 6.75h.008v.008H12V6.75z" />
-                        </svg>
-                    </div>
-                    <div>
-                        <p class="text-xs text-gray-400 leading-none">Tasa BCV Oficial</p>
-                        <p class="text-sm font-bold text-white leading-tight mt-0.5 tabular-nums">
-                            Bs.&nbsp;{{ Number(bcvRate).toFixed(2) }}&nbsp;<span class="font-normal text-gray-400">/ USD</span>
-                        </p>
-                    </div>
-                </div>
-
-                <!-- Separador -->
-                <div class="hidden sm:block h-8 w-px bg-gray-700 flex-shrink-0" />
-
-                <!-- Valor en VES -->
-                <div class="flex-1 min-w-0">
-                    <p class="text-xs text-gray-400">Valor del inventario en bolívares</p>
-                    <p class="text-sm font-semibold text-emerald-400 tabular-nums truncate">
-                        Bs.&nbsp;{{ formatVES(metrics.inventory_value_usd) }}
-                    </p>
-                </div>
-
-                <!-- Editar tasa -->
-                <div class="flex items-center gap-2 flex-shrink-0 ml-auto">
-                    <template v-if="!editingRate">
-                        <button
-                            id="edit-bcv-rate-btn"
-                            @click="startEditRate"
-                            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 border border-gray-600 transition-colors"
-                        >
-                            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
+        <div class="min-h-full bg-slate-50 text-slate-900">
+            <!-- ── Encabezado ─────────────────────────────────────── -->
+            <header class="border-b border-slate-200 bg-white/80 backdrop-blur">
+                <div class="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
+                    <div class="flex items-center gap-3">
+                        <div class="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-blue-800 text-white shadow-lg shadow-blue-700/25">
+                            <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M6.429 9.75L2.25 12l4.179 2.25m0-4.5l5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L21.75 12l-4.179 2.25m0 0l4.179 2.25L12 21.75 2.25 16.5l4.179-2.25m11.142 0l-5.571 3-5.571-3" />
                             </svg>
-                            Actualizar tasa
-                        </button>
-                    </template>
-                    <template v-else>
-                        <div class="flex items-center gap-1.5">
-                            <span class="text-xs text-gray-400 flex-shrink-0">Bs.</span>
-                            <input
-                                id="bcv-rate-input"
-                                v-model="newRateInput"
-                                type="number"
-                                step="0.01"
-                                min="0.01"
-                                @keyup.enter="submitRate"
-                                @keyup.escape="cancelEditRate"
-                                class="w-28 px-3 py-1.5 rounded-lg bg-gray-700 border border-indigo-500 text-white text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                autofocus
-                            />
-                            <span class="text-xs text-gray-400 flex-shrink-0">/ USD</span>
-                            <button
-                                @click="submitRate"
-                                :disabled="rateForm.processing"
-                                title="Guardar tasa"
-                                class="p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-50"
-                            >
-                                <svg v-if="rateForm.processing" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                                </svg>
-                                <svg v-else class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                                </svg>
-                            </button>
-                            <button
-                                @click="cancelEditRate"
-                                title="Cancelar"
-                                class="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-600 transition-colors"
-                            >
-                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                </svg>
-                            </button>
                         </div>
-                    </template>
-                </div>
-            </div>
-
-            <!-- ── Métricas ────────────────────────────────────────── -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-                <StatCard
-                    title="Total de Productos"
-                    :value="metrics.total_products"
-                    subtitle="Productos activos"
-                    color="indigo"
-                >
-                    <template #icon>
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
-                    </template>
-                </StatCard>
-
-                <StatCard
-                    title="Stock Bajo"
-                    :value="metrics.low_stock_count"
-                    subtitle="Requieren reposición"
-                    color="amber"
-                >
-                    <template #icon>
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-                    </template>
-                </StatCard>
-
-                <StatCard
-                    title="Agotados"
-                    :value="metrics.out_of_stock_count"
-                    subtitle="Sin existencias"
-                    color="red"
-                >
-                    <template #icon>
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </template>
-                </StatCard>
-
-                <!-- Valor inventario con dual moneda -->
-                <StatCard
-                    title="Valor del Inventario"
-                    :value="'$\u00a0' + metrics.inventory_value_usd"
-                    :subtitle="'≈\u00a0Bs.\u00a0' + formatVES(metrics.inventory_value_usd)"
-                    color="emerald"
-                >
-                    <template #icon>
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </template>
-                </StatCard>
-            </div>
-
-            <!-- ── Grid: Alertas + Movimientos ─────────────────────── -->
-            <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
-
-                <!-- Productos con stock bajo -->
-                <div class="xl:col-span-2 rounded-2xl bg-gray-800 border border-gray-700 overflow-hidden">
-                    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700">
-                        <div class="flex items-center gap-2">
-                            <div class="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                            <h2 class="text-sm font-semibold text-white">Alertas de Stock Bajo</h2>
-                        </div>
-                        <Link
-                            :href="route('products.index', { low_stock: 1 })"
-                            class="text-xs text-indigo-400 hover:text-indigo-300 font-medium transition-colors"
-                        >
-                            Ver todos →
-                        </Link>
-                    </div>
-
-                    <div v-if="lowStockProducts.length === 0" class="flex flex-col items-center justify-center py-12 text-center">
-                        <svg class="w-10 h-10 text-gray-600 mb-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                        <p class="text-gray-400 text-sm font-medium">¡Stock en óptimas condiciones!</p>
-                        <p class="text-gray-600 text-xs mt-1">No hay productos con alertas de stock.</p>
-                    </div>
-
-                    <div v-else class="divide-y divide-gray-700/50">
-                        <div
-                            v-for="product in lowStockProducts"
-                            :key="product.id"
-                            class="flex items-center gap-4 px-5 py-3.5 hover:bg-gray-700/30 transition-colors"
-                        >
-                            <div class="flex-1 min-w-0">
-                                <div class="flex items-center gap-2 flex-wrap">
-                                    <Link
-                                        :href="route('products.show', product.id)"
-                                        class="text-sm font-medium text-white hover:text-indigo-400 transition-colors"
-                                    >
-                                        {{ product.name }}
-                                    </Link>
-                                    <Badge :text="product.sku" variant="gray" />
-                                </div>
-                                <p class="text-xs text-gray-400 mt-0.5">{{ product.category?.name ?? '—' }}</p>
-                            </div>
-                            <div class="flex-shrink-0 text-right">
-                                <p class="text-sm font-bold" :class="product.current_stock <= 0 ? 'text-red-400' : 'text-amber-400'">
-                                    {{ product.current_stock }} / {{ product.min_stock }}
-                                </p>
-                                <p class="text-xs text-gray-500">actual / mínimo</p>
-                            </div>
-                            <div class="flex-shrink-0 w-20 hidden sm:block">
-                                <div class="h-1.5 rounded-full bg-gray-700 overflow-hidden">
-                                    <div
-                                        :class="['h-full rounded-full transition-all', product.current_stock <= 0 ? 'bg-red-500' : 'bg-amber-500']"
-                                        :style="`width: ${Math.min((product.current_stock / Math.max(product.min_stock, 1)) * 100, 100)}%`"
-                                    />
-                                </div>
-                            </div>
+                        <div>
+                            <h1 class="text-xl font-semibold tracking-tight text-slate-900">Control de Inventario</h1>
+                            <p class="text-sm text-slate-500">Gestión de productos y stock</p>
                         </div>
                     </div>
-                </div>
 
-                <!-- Últimos movimientos -->
-                <div class="rounded-2xl bg-gray-800 border border-gray-700 overflow-hidden">
-                    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700">
-                        <h2 class="text-sm font-semibold text-white">Últimos Movimientos</h2>
-                        <Link
-                            :href="route('inventory-movements.index')"
-                            class="text-xs text-indigo-400 hover:text-indigo-300 font-medium transition-colors"
-                        >
-                            Ver todos →
-                        </Link>
-                    </div>
-
-                    <div v-if="recentMovements.length === 0" class="flex flex-col items-center justify-center py-12">
-                        <svg class="w-8 h-8 text-gray-600 mb-2" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 7.5L7.5 3m0 0L12 7.5M7.5 3v13.5m13.5 0L16.5 21m0 0L12 16.5m4.5 4.5V7.5" />
-                        </svg>
-                        <p class="text-gray-500 text-sm">Sin movimientos aún.</p>
-                    </div>
-
-                    <div v-else class="divide-y divide-gray-700/50">
-                        <div
-                            v-for="movement in recentMovements"
-                            :key="movement.id"
-                            class="flex items-start gap-3 px-5 py-3.5 hover:bg-gray-700/20 transition-colors"
-                        >
-                            <div :class="['mt-0.5 flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center',
-                                movement.type === 'entry'      ? 'bg-emerald-500/10' :
-                                movement.type === 'exit'       ? 'bg-red-500/10'     : 'bg-amber-500/10']">
-                                <svg
-                                    :class="['w-3.5 h-3.5',
-                                        movement.type === 'entry' ? 'text-emerald-400' :
-                                        movement.type === 'exit'  ? 'text-red-400'     : 'text-amber-400']"
-                                    fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"
+                    <div class="flex flex-wrap items-center gap-2">
+                        <!-- Tasa BCV -->
+                        <div class="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm">
+                            <span class="text-slate-500">BCV</span>
+                            <template v-if="!editingRate">
+                                <span class="font-semibold text-slate-900 tabular-nums">Bs. {{ Number(bcvRate).toFixed(2) }}</span>
+                                <button
+                                    id="edit-bcv-rate-btn"
+                                    type="button"
+                                    title="Actualizar tasa BCV"
+                                    class="rounded-md p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-blue-700"
+                                    @click="startEditRate"
                                 >
-                                    <path v-if="movement.type === 'entry'"      stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />
-                                    <path v-else-if="movement.type === 'exit'" stroke-linecap="round" stroke-linejoin="round" d="M19.5 13.5L12 21m0 0l-7.5-7.5M12 21V3" />
-                                    <path v-else                                stroke-linecap="round" stroke-linejoin="round" d="M3 7.5L7.5 3m0 0L12 7.5M7.5 3v13.5m13.5 0L16.5 21m0 0L12 16.5m4.5 4.5V7.5" />
-                                </svg>
-                            </div>
-                            <div class="flex-1 min-w-0">
-                                <p class="text-sm text-white font-medium truncate">{{ movement.product?.name ?? '—' }}</p>
-                                <p class="text-xs text-gray-400 truncate">{{ movement.reason }}</p>
-                                <p class="text-xs text-gray-600 mt-0.5">{{ formatDate(movement.created_at) }}</p>
-                            </div>
-                            <div class="flex-shrink-0 text-right">
-                                <p :class="['text-sm font-bold tabular-nums',
-                                    movement.type === 'entry' ? 'text-emerald-400' :
-                                    movement.type === 'exit'  ? 'text-red-400'     : 'text-amber-400']">
-                                    {{ movement.type === 'entry' ? '+' : movement.type === 'exit' ? '−' : '±' }}{{ movement.quantity }}
-                                </p>
-                            </div>
+                                    <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
+                                    </svg>
+                                </button>
+                            </template>
+                            <form v-else class="flex items-center gap-1.5" @submit.prevent="submitRate">
+                                <input
+                                    id="bcv-rate-input"
+                                    ref="rateInput"
+                                    v-model="rateForm.rate"
+                                    type="number"
+                                    step="0.01"
+                                    min="0.01"
+                                    class="w-24 rounded-md border-slate-300 px-2 py-1 text-right text-sm tabular-nums focus:border-blue-600 focus:ring-blue-600"
+                                    @keyup.escape="editingRate = false"
+                                />
+                                <button type="submit" :disabled="rateForm.processing" class="rounded-md bg-blue-700 px-2 py-1 text-xs font-medium text-white hover:bg-blue-800 disabled:opacity-50">
+                                    Guardar
+                                </button>
+                                <button type="button" class="rounded-md px-1.5 py-1 text-xs text-slate-500 hover:bg-slate-100" @click="editingRate = false">
+                                    ✕
+                                </button>
+                            </form>
                         </div>
+
+                        <button
+                            id="export-btn"
+                            type="button"
+                            class="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-slate-900 active:scale-[0.98]"
+                            @click="exportCsv"
+                        >
+                            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                            </svg>
+                            Exportar
+                        </button>
+                        <Link
+                            id="new-product-btn"
+                            :href="route('products.create')"
+                            class="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-medium text-white shadow-lg shadow-blue-700/25 transition-all hover:bg-blue-800 active:scale-[0.98]"
+                        >
+                            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2.2" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                            </svg>
+                            Nuevo producto
+                        </Link>
                     </div>
+                </div>
+            </header>
+
+            <div class="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6 lg:px-8">
+                <!-- ── Tarjetas de resumen ─────────────────────────── -->
+                <SummaryCards :metrics="metrics" :bcv-rate="bcvRate" />
+
+                <div class="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_20rem]">
+                    <!-- ── Listado de productos ────────────────────── -->
+                    <section aria-label="Listado de productos" class="min-w-0 space-y-4">
+                        <!-- Búsqueda + categoría -->
+                        <div class="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row">
+                            <div class="relative flex-1">
+                                <svg class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                                </svg>
+                                <input
+                                    id="product-search"
+                                    v-model="search"
+                                    type="search"
+                                    placeholder="Buscar por nombre, SKU o proveedor..."
+                                    class="w-full rounded-xl border-slate-200 bg-slate-50 py-2.5 pl-10 pr-3 text-sm placeholder-slate-400 transition focus:border-blue-600 focus:bg-white focus:ring-blue-600"
+                                />
+                            </div>
+                            <select
+                                id="category-filter"
+                                v-model="categoryId"
+                                class="rounded-xl border-slate-200 bg-slate-50 py-2.5 pl-3 pr-9 text-sm text-slate-700 focus:border-blue-600 focus:ring-blue-600 sm:w-56"
+                            >
+                                <option value="">Todas las categorías</option>
+                                <option v-for="category in categories" :key="category.id" :value="category.id">
+                                    {{ category.name }}
+                                </option>
+                            </select>
+                        </div>
+
+                        <!-- Pestañas de estado -->
+                        <div class="flex flex-wrap items-center justify-between gap-3">
+                            <div class="flex flex-wrap gap-2" role="tablist" aria-label="Filtrar por estado">
+                                <button
+                                    v-for="tab in statusTabs"
+                                    :id="`status-tab-${tab.value}`"
+                                    :key="tab.value"
+                                    type="button"
+                                    role="tab"
+                                    :aria-selected="statusFilter === tab.value"
+                                    :class="[
+                                        'inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-medium transition-all duration-150',
+                                        statusFilter === tab.value
+                                            ? 'bg-blue-700 text-white shadow-md shadow-blue-700/25'
+                                            : 'bg-slate-200/70 text-slate-600 hover:bg-slate-200 hover:text-slate-900',
+                                    ]"
+                                    @click="statusFilter = tab.value"
+                                >
+                                    {{ tab.label }}
+                                    <span
+                                        :class="[
+                                            'rounded-full px-1.5 text-[11px] tabular-nums',
+                                            statusFilter === tab.value ? 'bg-white/20' : 'bg-white text-slate-500',
+                                        ]"
+                                    >{{ countByStatus[tab.value] }}</span>
+                                </button>
+                            </div>
+                            <p class="text-sm text-slate-500">
+                                {{ formatNumber(filteredProducts.length) }} de {{ formatNumber(products.length) }} productos
+                            </p>
+                        </div>
+
+                        <ProductTable :products="filteredProducts" @delete="productToDelete = $event" />
+                    </section>
+
+                    <!-- ── Alertas ─────────────────────────────────── -->
+                    <StockAlerts :alerts="alerts" class="xl:sticky xl:top-6 xl:self-start" />
                 </div>
             </div>
         </div>
+
+        <ConfirmModal
+            :show="!!productToDelete"
+            title="¿Eliminar producto?"
+            :message="productToDelete ? `Se eliminará «${productToDelete.name}» del inventario.` : ''"
+            :processing="deleting"
+            @confirm="confirmDelete"
+            @cancel="productToDelete = null"
+        />
     </AuthenticatedLayout>
 </template>
